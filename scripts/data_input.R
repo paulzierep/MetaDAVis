@@ -27,6 +27,121 @@ strip_rank_prefix <- function(x) {
   x
 }
 
+# Reduce a column name to something that can be compared: Galaxy hands the
+# header over the way its own parser saw it, which can differ from what
+# read.delim() produced - a comment marker, surrounding quotes, a stray
+# carriage return or just a different case.
+normalise_column_name <- function(x) {
+  x <- trimws(as.character(x))
+  x <- gsub("^\"|\"$", "", x)
+  tolower(x)
+}
+
+# Pick the grouping condition column out of the metadata table. `picked` is
+# either a column number (what Galaxy's data_column param and the in-app text
+# field hand over) or a column name. Returns the name of the column to use, or
+# NULL when nothing usable was asked for.
+#
+# An unusable choice is a warning rather than an error on purpose: the condition
+# is a property of the analysis, and refusing to load the data because of it
+# leaves the user with an empty summary table and no way to see the samples at
+# all. The second column is the convention for every input format of this
+# application, so that is what is used instead.
+resolve_condition_column <- function(picked, metadata_names) {
+  usable <- length(picked) == 1L && !is.na(picked) &&
+    nzchar(trimws(as.character(picked)))
+  if (!usable) return(NULL)
+
+  want <- normalise_column_name(picked)
+  if (grepl("^[0-9]+$", want)) {
+    index <- as.integer(want)
+    # Column 1 holds the sample ids, so it can never be the condition: every
+    # downstream plot reads group_index[, 2] as the condition.
+    if (index >= 2L && index <= length(metadata_names)) {
+      return(metadata_names[[index]])
+    }
+    warning(
+      "Column ", index, " is not a usable grouping condition column: the ",
+      "metadata table has ", length(metadata_names) - 1L,
+      " annotation column(s), so pick one of 2 to ", length(metadata_names),
+      ". Using column 2 instead.", call. = FALSE
+    )
+    return(NULL)
+  }
+
+  hit <- which(normalise_column_name(metadata_names) == want)
+  if (!length(hit)) {
+    warning(
+      "The metadata table has no column named '", as.character(picked),
+      "'. Available columns: ", paste(metadata_names, collapse = ", "),
+      ". Using column 2 instead.", call. = FALSE
+    )
+    return(NULL)
+  }
+  if (hit[[1]] == 1L) {
+    warning(
+      "'", as.character(picked), "' is the sample id column, not an ",
+      "annotation. Using column 2 instead.", call. = FALSE
+    )
+    return(NULL)
+  }
+  metadata_names[[hit[[1]]]]
+}
+
+# Read the sample metadata table and reduce it to the two columns this
+# application can use: the sample ids and the grouping condition. Every
+# downstream plot reads the second column of the metadata as the condition, and
+# the summary tables are built from it, so the remaining annotation columns of a
+# wide table are dropped instead of being carried around unused.
+#
+# Returns the three shapes the rest of the application expects:
+#
+#   data_index   sample ids and condition, side by side, as Samples/Condition
+#   data_index1  the condition on its own, keyed by sample id
+#   data_index2  the distinct conditions, for the "No. of conditions" table
+read_sample_metadata <- function(Index, sep = NULL, Condition = NULL, log_head = NULL) {
+  if (is.null(sep)) sep <- detect_sep(Index)
+  raw <- read.delim(Index, header = TRUE, sep = sep, check.names = FALSE)
+
+  if (ncol(raw) < 2L) {
+    stop("The metadata table needs a sample column plus at least one annotation column.")
+  }
+  if (nrow(raw) == 0L) {
+    stop("The metadata table does not contain any samples.")
+  }
+  if (anyDuplicated(raw[[1L]])) {
+    stop("The sample ids in the metadata table must be unique.")
+  }
+
+  picked <- resolve_condition_column(Condition, colnames(raw))
+  if (is.null(picked)) picked <- colnames(raw)[[2]]
+
+  data_index <- raw[, c(1L, match(picked, colnames(raw))), drop = FALSE]
+  colnames(data_index) <- c("Samples", "Condition")
+  if (!is.null(log_head)) log_head(data_index, "data_index (sample metadata)")
+
+  # Same single annotation column as data_index, keyed by sample id, so the two
+  # cannot drift apart. Built from data_index rather than read a second time: a
+  # second read of the same file can disagree with the first one (quoting, line
+  # endings), and the sample names have to line up with the count matrix.
+  data_index1 <- data.frame(
+    Condition = data_index[["Condition"]],
+    row.names = data_index[["Samples"]]
+  )
+  if (!is.null(log_head)) log_head(data_index1, "data_index1 (condition, row.names=Samples)")
+
+  data_index2 <- unique(data_index["Condition"])
+  rownames(data_index2) <- NULL
+  if (!is.null(log_head)) log_head(data_index2, "data_index2 (unique conditions)")
+
+  list(
+    data_index  = data_index,
+    data_index1 = data_index1,
+    data_index2 = data_index2,
+    text        = paste("There are ", nrow(data_index), " Samples.", sep = "")
+  )
+}
+
 # Build the seven-column taxonomy layout MetaDAVis aggregates on, from a
 # phyloseq-style pair of tables:
 #
@@ -105,7 +220,9 @@ phyloseq_counts_taxonomy <- function(Input, Taxonomy, sep = NULL, show_head = FA
 
 # `sep`/`sep1` default to NULL so that the phyloseq path can detect the separator
 # per file; the other formats are called with explicit separators by the UI.
-data_input_RA <- function(file_type, Input, Index, Taxonomy = NULL, type, sep = NULL, sep1 = NULL, show_head = TRUE, head_n = 5){
+data_input_RA <- function(file_type, Input, Index, Taxonomy = NULL, type, sep = NULL, sep1 = NULL, Condition = NULL, show_head = TRUE, head_n = 5){
+  # Condition: which metadata column holds the grouping condition, either a
+  # column number or a column name. NULL/empty means "use the second column".
   
   log_head <- function(x, label){
     if (show_head) {
@@ -122,62 +239,35 @@ data_input_RA <- function(file_type, Input, Index, Taxonomy = NULL, type, sep = 
   
   file_type <- as.character(file_type)
   taxa <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
-  
-  # metadata file
-  if (file_type == "qiime_format" | file_type == "Megan" | file_type == "check"){
-    data_index  <- read.delim(Index, header = TRUE, sep = sep1)
-    colnames(data_index)[1:2] <- c("Samples","Condition")
-    log_head(data_index, "data_index (metadata)")
-    
-    data_index1 <- read.delim(Index, header = TRUE, row.names = 1, sep = sep1)
-    colnames(data_index1) <- "Condition"
-    log_head(data_index1, "data_index1 (metadata, row.names=Samples)")
-    
-    text_data_index <- paste("There are ", nrow(data_index), " Samples.", sep = "")
-    data_index2 <- unique(data_index[c("Condition")])
-    rownames(data_index2) <- NULL
-    log_head(data_index2, "data_index2 (unique conditions)")
-  }
-  else if (file_type == "phyloseq"){
-    # phyloseq sample data: sample ids in the first column, one column per
-    # annotation. Kept in exactly the same shape as the other input types,
-    # because the downstream plotting code reads column 1 as "Samples" and
-    # column 2 as the grouping condition (see individual_bar_plot.R).
-    if (is.null(sep1)) sep1 <- detect_sep(Index)
-    data_index  <- read.delim(Index, header = TRUE, sep = sep1, check.names = FALSE)
-    if (ncol(data_index) < 2L) {
-      stop("The metadata table needs a sample column plus at least one annotation column.")
-    }
-    colnames(data_index)[1:2] <- c("Samples","Condition")
-    log_head(data_index, "data_index (phyloseq metadata)")
 
-    data_index1 <- read.delim(Index, header = TRUE, row.names = 1, sep = sep1, check.names = FALSE)
-    colnames(data_index1) <- "Condition"
-    log_head(data_index1, "data_index1 (phyloseq metadata, row.names=Samples)")
-
-    text_data_index <- paste("There are ", nrow(data_index), " Samples.", sep = "")
-    data_index2 <- unique(data_index[c("Condition")])
-    rownames(data_index2) <- NULL
-    log_head(data_index2, "data_index2 (phyloseq unique conditions)")
+  if (file_type == "phyloseq"){
+    # The Galaxy input format: a phyloseq sample data table with the sample ids
+    # in the first column and one annotation column per further column. Its
+    # separator is detected from the file, because Galaxy datasets carry no
+    # extension and the staged copies keep their plain names.
+    metadata_sep <- NULL
   }
   else if (file_type == "example"){
-    data_index  <- read.delim(Index, header = TRUE, sep = "\t")
-    colnames(data_index)[1:2] <- c("Samples","Condition")
-    log_head(data_index, "data_index (metadata)")
-    
-    data_index1 <- read.delim(Index, header = TRUE, row.names = 1, sep = "\t")
-    colnames(data_index1) <- "Condition"
-    log_head(data_index1, "data_index1 (metadata, row.names=Samples)")
-    
-    text_data_index <- paste("There are ", nrow(data_index), " Samples.", sep = "")
-    data_index2 <- unique(data_index[c("Condition")])
-    rownames(data_index2) <- NULL
-    log_head(data_index2, "data_index2 (unique conditions)")
+    metadata_sep <- "\t"
+  }
+  else if (file_type == "qiime_format" | file_type == "Megan" | file_type == "check"){
+    metadata_sep <- sep1
   }
   else {
     stop("Invalid file type. Please check your input.")
   }
-  
+
+  # Metadata file, reduced to the sample ids and the grouping condition. Every
+  # input format shares this path, so they all end up with the same two-column
+  # shape whatever the file they were given looks like.
+  metadata <- read_sample_metadata(
+    Index, sep = metadata_sep, Condition = Condition, log_head = log_head
+  )
+  data_index   <- metadata$data_index
+  data_index1  <- metadata$data_index1
+  data_index2  <- metadata$data_index2
+  text_data_index <- metadata$text
+
   # counts / taxonomy input
   if (file_type == "phyloseq" && (is.null(Taxonomy) || !nzchar(Taxonomy) || !file.exists(Taxonomy))) {
     stop("The phyloseq input format needs an OTU table, a taxonomy table and a metadata table.")
