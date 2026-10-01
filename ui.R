@@ -3,6 +3,10 @@ library(shinythemes)
 library(shinyFiles)
 library(DT)
 library(shinyjs)
+# The "Send to Galaxy" buttons of every download of this application. Sourced here
+# as well as from global.R, because this file must not depend on the order shiny
+# happens to load global.R and ui.R in.
+source("scripts/galaxy_downloads.R")
 #library(bslib)
 #options(warn=-1)
 shinythemes::themeSelector()
@@ -31,7 +35,11 @@ shinyUI(
     theme = shinytheme("cerulean"),
     "",
     id = "main_navbar",
+    # Adds a "Send to Galaxy" button next to every download button of the
+    # application, but only when this session can upload back to Galaxy at all
+    # (see scripts/galaxy_downloads.R).
     header = tagList(
+      metadavis_galaxy_send_ui(),
       tags$head(
         tags$style(HTML("
           .run-status-badge {

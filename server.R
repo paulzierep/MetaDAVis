@@ -2,6 +2,65 @@ source("global.R")
 #library("R.utils")
 #options(warn=-1)
 server <- function(input, output, session) {
+  # --- Send to Galaxy -------------------------------------------------------
+  # Each download button of this application has a "Send to Galaxy" companion
+  # that puts the file it produces into the history of this interactive session
+  # (see scripts/galaxy_downloads.R). The registry below is what makes that
+  # possible without a second implementation of any table or plot:
+  # metadavis_download() is downloadHandler() plus a note of the file name and
+  # content function, and the observer produces the file again on request.
+  metadavis_downloads <- metadavis_download_registry()
+  metadavis_download <- function(...) {
+    handler <- metadavis_download_with(metadavis_downloads, ...)
+    handler
+  }
+
+  observeEvent(input$metadavis_galaxy_send, {
+    id <- input$metadavis_galaxy_send
+    # Always let the browser re-enable its button, whatever happens below.
+    on.exit(session$sendCustomMessage("metadavis_galaxy_send_done", id), add = TRUE)
+
+    handler <- get0(id, envir = metadavis_downloads, inherits = FALSE)
+    if (is.null(handler)) {
+      showNotification(
+        paste0("There is nothing to send for ", id, "."),
+        type = "warning"
+      )
+      return()
+    }
+
+    name <- metadavis_download_name(handler, id)
+    # A download handler is written against a path shiny hands it, so any
+    # writable path will do - the extension is what Galaxy reads the datatype
+    # from, and that is what the name carries.
+    path <- file.path(tempdir(), paste0("metadavis_", session$token, "_", name))
+    produced <- tryCatch(
+      {
+        handler$content(path)
+        TRUE
+      },
+      error = function(e) {
+        showNotification(
+          paste0("The file could not be produced: ", conditionMessage(e)),
+          type = "error",
+          duration = 15
+        )
+        FALSE
+      }
+    )
+    if (!produced || !file.exists(path)) {
+      return()
+    }
+
+    result <- metadavis_send_to_galaxy(path, name)
+    unlink(path)
+    showNotification(
+      result$message,
+      type = if (isTRUE(result$ok)) "message" else "error",
+      duration = if (isTRUE(result$ok)) 8 else 30
+    )
+  }, ignoreNULL = TRUE, ignoreInit = TRUE)
+
   #Timeout
   observeEvent(input$timeOut, { 
     print(paste0("Session (", session$token, ") timed out at: ", Sys.time()))
@@ -480,7 +539,7 @@ server <- function(input, output, session) {
     cat(sess_txt())
   })
   
-  output$download_sess <- downloadHandler(
+  output$download_sess <- metadavis_download("download_sess", 
     filename = function() {
       paste0("MetaDAVis_session-info_", format(Sys.time(), "%Y-%m-%d_%H-%M-%S"), ".txt")
     },
@@ -616,28 +675,28 @@ server <- function(input, output, session) {
   output$conditions_table <- renderDataTable(DT::datatable(dataInput_RA_level()[[10]],options = list(pageLength = 15,scrollX = TRUE)))
   output$count_table <- renderDataTable(DT::datatable(dataInput_RA_level()[[11]],options = list(pageLength = 15,scrollX = TRUE)))
   
-  output$download_taxonomy_table <- downloadHandler(
+  output$download_taxonomy_table <- metadavis_download("download_taxonomy_table", 
     filename = function() { 
       paste("taxonomy_table", '.csv', sep='') },
     content = function(file){
       write.csv(dataInput_RA_level()[[4]], file, row.names = TRUE)
     }
   )
-  output$download_metadata_table <- downloadHandler(
+  output$download_metadata_table <- metadavis_download("download_metadata_table", 
     filename = function() { 
       paste("metadata_table", '.csv', sep='') },
     content = function(file){
       write.csv(dataInput_RA_level()[[7]], file, row.names = TRUE)
     }
   )
-  output$download_conditions_table <- downloadHandler(
+  output$download_conditions_table <- metadavis_download("download_conditions_table", 
     filename = function() { 
       paste("conditions_table", '.csv', sep='') },
     content = function(file){
       write.csv(dataInput_RA_level()[[10]], file, row.names = TRUE)
     }
   )
-  output$download_count_table <- downloadHandler(
+  output$download_count_table <- metadavis_download("download_count_table", 
     filename = function() { 
       paste("count_table", '.csv', sep='') },
     content = function(file){
@@ -668,7 +727,7 @@ server <- function(input, output, session) {
     data_bar_plot_group()
   })
   
-  output$download_bar_plot_group<- downloadHandler(
+  output$download_bar_plot_group<- metadavis_download("download_bar_plot_group", 
     filename = function(){
       paste("Bar_Plot_Group_Top_", input$top_n_bar_plot_group,"_", dataInput_RA_level()[[6]],input$select_image_type_group, sep="")
     },
@@ -696,7 +755,7 @@ server <- function(input, output, session) {
   })
   
   
-  output$download_bar_plot_individual<- downloadHandler(
+  output$download_bar_plot_individual<- metadavis_download("download_bar_plot_individual", 
     filename = function(){
       paste("Bar_Plot_Individual_Top_", input$top_n_bar_plot_individual,"_", dataInput_RA_level()[[6]],input$select_image_type_individual, sep="")
     },
@@ -727,7 +786,7 @@ server <- function(input, output, session) {
     data_heatmap()[[1]]
   })
   
-  output$download_heatmap<- downloadHandler(
+  output$download_heatmap<- metadavis_download("download_heatmap", 
     filename = function(){
       paste("Heatmap",input$select_image_type_heatmap, sep="")
     },
@@ -759,7 +818,7 @@ server <- function(input, output, session) {
   })
   
   
-  output$download_Boxplot_Alpha_Div<- downloadHandler(
+  output$download_Boxplot_Alpha_Div<- metadavis_download("download_Boxplot_Alpha_Div", 
     filename = function(){
       method_tmp <- c("Observed", "Chao1", "ACE", "Shannon", "Simpson", "InvSimpson", "Fisher", "All_Combined")
       paste("Alpha_Diversity_", method_tmp[as.numeric(input$select_alpha)],"_index", input$select_image_type_alpha, sep="")
@@ -772,7 +831,7 @@ server <- function(input, output, session) {
   output$alpha_table <- renderDataTable(DT::datatable(data_Alpha_Div_plot()[[2]],options = list(pageLength = 15,scrollX = TRUE)))
   
   
-  output$download_result_alpha <- downloadHandler(
+  output$download_result_alpha <- metadavis_download("download_result_alpha", 
     filename = function() { 
       paste("Alpha_diversity_result", '.csv', sep='') },
     content = function(file){
@@ -803,7 +862,7 @@ server <- function(input, output, session) {
     data_Beta_Div_plot()[1]
   })
   
-  output$download_Boxplot_beta_Div<- downloadHandler(
+  output$download_Boxplot_beta_Div<- metadavis_download("download_Boxplot_beta_Div", 
     filename = function(){
       paste("Beta_Diversity_", input$select_beta, "_",input$select_method, input$select_image_type_beta, sep="")
     },
@@ -815,7 +874,7 @@ server <- function(input, output, session) {
 
   output$beta_table <- renderDataTable(DT::datatable(data_Beta_Div_plot()[[2]],options = list(pageLength = 15,scrollX = TRUE)))
   
-  output$download_result_beta <- downloadHandler(
+  output$download_result_beta <- metadavis_download("download_result_beta", 
     filename = function() { 
       paste("Beta_diversity_result", '.csv', sep='') },
     content = function(file){
@@ -825,7 +884,7 @@ server <- function(input, output, session) {
   
   output$beta_table2 <- renderDataTable(DT::datatable(data_Beta_Div_plot()[[3]],options = list(pageLength = 15,scrollX = TRUE)))
   
-  output$download_result_beta2 <- downloadHandler(
+  output$download_result_beta2 <- metadavis_download("download_result_beta2", 
     filename = function() { 
       paste("Beta_diversity_adonis_result", '.csv', sep='') },
     content = function(file){
@@ -856,7 +915,7 @@ server <- function(input, output, session) {
     data_pca_plot()[[1]]
   })
   
-  output$download_plot_pca <- downloadHandler(
+  output$download_plot_pca <- metadavis_download("download_plot_pca", 
     filename = function(){
      paste("PCA_plot", input$select_image_type_pca, sep="")
     },
@@ -867,7 +926,7 @@ server <- function(input, output, session) {
   
   output$pca_table <- renderDataTable(DT::datatable(data_pca_plot()[[2]],options = list(pageLength = 15,scrollX = TRUE)))
   
-  output$download_result_pca <- downloadHandler(
+  output$download_result_pca <- metadavis_download("download_result_pca", 
     filename = function() { 
       paste("pca_result", '.csv', sep='') },
     content = function(file){
@@ -895,7 +954,7 @@ server <- function(input, output, session) {
   
   output$pca3d_table <- renderDataTable(DT::datatable(data_pca3d_table()[[2]],options = list(pageLength = 15,scrollX = TRUE)))
   
-  output$download_result_pca3d <- downloadHandler(
+  output$download_result_pca3d <- metadavis_download("download_result_pca3d", 
     filename = function() { 
       paste("pca3d_result", '.csv', sep='') },
     content = function(file){
@@ -929,7 +988,7 @@ server <- function(input, output, session) {
   
   output$tsne_table <- renderDataTable(DT::datatable(data_tsne_table()[[2]],options = list(pageLength = 15,scrollX = TRUE)))
   
-  output$download_result_tsne <- downloadHandler(
+  output$download_result_tsne <- metadavis_download("download_result_tsne", 
     filename = function() { 
       paste("tsne_result_", input$select_tsne_method, '.csv', sep='') },
     content = function(file){
@@ -941,7 +1000,7 @@ server <- function(input, output, session) {
     data_tsne_table()[[1]]
   })
   
-  output$download_plot_tsne <- downloadHandler(
+  output$download_plot_tsne <- metadavis_download("download_plot_tsne", 
     filename = function(){
       paste("tsne_plot_", input$select_tsne_method, input$select_image_type_tsne, sep="")
     },
@@ -972,7 +1031,7 @@ server <- function(input, output, session) {
   
   output$umap_table <- renderDataTable(DT::datatable(data_umap_table()[[2]],options = list(pageLength = 15,scrollX = TRUE)))
   
-  output$download_result_umap <- downloadHandler(
+  output$download_result_umap <- metadavis_download("download_result_umap", 
     filename = function() { 
       paste("umap_result_based_on_condition_", input$select_umap_method, '.csv', sep='') },
     content = function(file){
@@ -982,7 +1041,7 @@ server <- function(input, output, session) {
   
   output$umap_table1 <- renderDataTable(DT::datatable(data_umap_table()[[3]],options = list(pageLength = 15,scrollX = TRUE)))
   
-  output$download_result_umap1 <- downloadHandler(
+  output$download_result_umap1 <- metadavis_download("download_result_umap1", 
     filename = function() { 
       paste("umap_resul_based_on_cluster_", input$select_umap_method, '.csv', sep='') },
     content = function(file){
@@ -994,7 +1053,7 @@ server <- function(input, output, session) {
     data_umap_table()[[1]]
   })
   
-  output$download_plot_umap <- downloadHandler(
+  output$download_plot_umap <- metadavis_download("download_plot_umap", 
     filename = function(){
       paste("umap_plot_", input$select_umap_method, input$select_image_type_umap, sep="")
     },
@@ -1022,7 +1081,7 @@ server <- function(input, output, session) {
   # 
   # output$taxa_based_correlation_table <- renderDataTable(DT::datatable(data_taxa_based_correlation_table()[[2]],options = list(pageLength = 15,scrollX = TRUE)))
   # 
-  # output$download_result_taxa_based_correlation <- downloadHandler(
+  # output$download_result_taxa_based_correlation <- metadavis_download("download_result_taxa_based_correlation", 
   #   filename = function() { 
   #     paste("taxa_based_correlation_result_", input$select_taxa_based_correlation_method, '.csv', sep='') },
   #   content = function(file){
@@ -1034,7 +1093,7 @@ server <- function(input, output, session) {
   #   data_taxa_based_correlation_table()[[1]]
   # })
   # 
-  # output$download_plot_taxa_based_correlation <- downloadHandler(
+  # output$download_plot_taxa_based_correlation <- metadavis_download("download_plot_taxa_based_correlation", 
   #   filename = function(){
   #     paste("taxa_based_correlation_plot_", input$select_taxa_based_correlation_method, input$select_image_type_taxa_based_correlation, sep="")
   #   },
@@ -1075,7 +1134,7 @@ server <- function(input, output, session) {
   
   output$samples_based_correlation_table <- renderDataTable(DT::datatable(data_samples_based_correlation_table()[[2]],options = list(pageLength = 15,scrollX = TRUE)))
   
-  output$download_result_samples_based_correlation <- downloadHandler(
+  output$download_result_samples_based_correlation <- metadavis_download("download_result_samples_based_correlation", 
     filename = function() { 
       paste("samples_based_correlation_result_", input$select_samples_based_correlation_method, '.csv', sep='') },
     content = function(file){
@@ -1087,7 +1146,7 @@ server <- function(input, output, session) {
     data_samples_based_correlation_table()[[1]]
   })
   
-  output$download_plot_samples_based_correlation <- downloadHandler(
+  output$download_plot_samples_based_correlation <- metadavis_download("download_plot_samples_based_correlation", 
     filename = function(){
       paste("samples_based_correlation_plot_", input$select_samples_based_correlation_method, input$select_image_type_samples_based_correlation, sep="")
     },
@@ -1128,7 +1187,7 @@ server <- function(input, output, session) {
   
   output$taxa_condition_based_correlation_table <- renderDataTable(DT::datatable(data_taxa_condition_based_correlation_table()[[2]],options = list(pageLength = 15,scrollX = TRUE)))
   
-  output$download_result_taxa_condition_based_correlation <- downloadHandler(
+  output$download_result_taxa_condition_based_correlation <- metadavis_download("download_result_taxa_condition_based_correlation", 
     filename = function() { 
       paste("taxa_condition_based_correlation_result_", input$select_taxa_condition_based_correlation_method, '.csv', sep='') },
     content = function(file){
@@ -1176,7 +1235,7 @@ server <- function(input, output, session) {
     data_taxa_condition_based_correlation_table()[[1]]
   })
   
-  output$download_plot_taxa_condition_based_correlation <- downloadHandler(
+  output$download_plot_taxa_condition_based_correlation <- metadavis_download("download_plot_taxa_condition_based_correlation", 
     filename = function(){
       paste("taxa_condition_based_correlation_plot_", input$select_taxa_condition_based_correlation_method, input$select_image_taxa_condition_based_correlation, sep="")
     },
@@ -1343,28 +1402,28 @@ server <- function(input, output, session) {
   
   output$wilcoxtest_table <- renderDataTable(DT::datatable((data_wilcoxtest()[[2]]),options = list(pageLength = 15,scrollX = TRUE)))
   
-  output$download_result_wilcoxtest_1 <- downloadHandler(
+  output$download_result_wilcoxtest_1 <- metadavis_download("download_result_wilcoxtest_1", 
     filename = function() { 
       paste("wilcoxtest_result_significant", '.csv', sep='') },
     content = function(file){
       write.csv(data_wilcoxtest()[[2]], file, row.names = FALSE)
     }
   )
-  output$download_result_wilcoxtest_2 <- downloadHandler(
+  output$download_result_wilcoxtest_2 <- metadavis_download("download_result_wilcoxtest_2", 
     filename = function() { 
       paste("wilcoxtest_result_all", '.csv', sep='') },
     content = function(file){
       write.csv(data_wilcoxtest()[[3]], file, row.names = FALSE)
     }
   )
-  output$download_result_wilcoxtest_3 <- downloadHandler(
+  output$download_result_wilcoxtest_3 <- metadavis_download("download_result_wilcoxtest_3", 
     filename = function() { 
       paste("wilcoxtest_relative_frequency", '.csv', sep='') },
     content = function(file){
       write.csv(data_wilcoxtest()[[4]], file)
     }
   )
-  output$download_result_wilcoxtest_4 <- downloadHandler(
+  output$download_result_wilcoxtest_4 <- metadavis_download("download_result_wilcoxtest_4", 
     filename = function() { 
       paste("total_counts_in_each_samples", '.csv', sep='') },
     content = function(file){
@@ -1382,7 +1441,7 @@ server <- function(input, output, session) {
   })
   
   
-  output$download_Boxplot_wilcoxtest<- downloadHandler(
+  output$download_Boxplot_wilcoxtest<- metadavis_download("download_Boxplot_wilcoxtest", 
     filename = function(){
       differential_plot_filename("wilcoxtest_plot", input$select_image_type_wilcoxtest, data_wilcoxtest(), 6, "wilcoxtest_individual_plot_page")
     },
@@ -1418,28 +1477,28 @@ server <- function(input, output, session) {
   
   output$ttest_table <- renderDataTable(DT::datatable((data_ttest()[[2]]), options = list( pageLength = 15, scrollX = TRUE)))
   
-  output$download_result_ttest_1 <- downloadHandler(
+  output$download_result_ttest_1 <- metadavis_download("download_result_ttest_1", 
     filename = function() { 
       paste("ttest_result_significant", '.csv', sep='') },
     content = function(file){
       write.csv(data_ttest()[[2]], file, row.names = FALSE)
     }
   )
-  output$download_result_ttest_2 <- downloadHandler(
+  output$download_result_ttest_2 <- metadavis_download("download_result_ttest_2", 
     filename = function() { 
       paste("ttest_result_all", '.csv', sep='') },
     content = function(file){
       write.csv(data_ttest()[[3]], file, row.names = FALSE)
     }
   )
-  output$download_result_ttest_3 <- downloadHandler(
+  output$download_result_ttest_3 <- metadavis_download("download_result_ttest_3", 
     filename = function() { 
       paste("ttest_relative_frequency", '.csv', sep='') },
     content = function(file){
       write.csv(data_ttest()[[4]], file)
     }
   )
-  output$download_result_ttest_4 <- downloadHandler(
+  output$download_result_ttest_4 <- metadavis_download("download_result_ttest_4", 
     filename = function() { 
       paste("total_counts_in_each_samples", '.csv', sep='') },
     content = function(file){
@@ -1457,7 +1516,7 @@ server <- function(input, output, session) {
   })
   
   
-  output$download_Boxplot_ttest<- downloadHandler(
+  output$download_Boxplot_ttest<- metadavis_download("download_Boxplot_ttest", 
     filename = function(){
       differential_plot_filename("ttest_plot", input$select_image_type_ttest, data_ttest(), 6, "ttest_individual_plot_page")
     },
@@ -1493,21 +1552,21 @@ server <- function(input, output, session) {
   
   output$metagenomeseq_table <- renderDataTable(DT::datatable((data_metagenomeseq()[[2]]), options = list( pageLength = 15, scrollX = TRUE)))
   
-  output$download_result_metagenomeseq_1 <- downloadHandler(
+  output$download_result_metagenomeseq_1 <- metadavis_download("download_result_metagenomeseq_1", 
     filename = function() { 
       paste("metagenomeseq_result_significant", '.csv', sep='') },
     content = function(file){
       write.csv(data_metagenomeseq()[[2]], file, row.names = FALSE)
     }
   )
-  output$download_result_metagenomeseq_2 <- downloadHandler(
+  output$download_result_metagenomeseq_2 <- metadavis_download("download_result_metagenomeseq_2", 
     filename = function() { 
       paste("metagenomeseq_result_all", '.csv', sep='') },
     content = function(file){
       write.csv(data_metagenomeseq()[[3]], file, row.names = FALSE)
     }
   )
-  output$download_result_metagenomeseq_3 <- downloadHandler(
+  output$download_result_metagenomeseq_3 <- metadavis_download("download_result_metagenomeseq_3", 
     filename = function() { 
       paste("total_counts_in_each_samples", '.csv', sep='') },
     content = function(file){
@@ -1524,7 +1583,7 @@ server <- function(input, output, session) {
   })
   
   
-  output$download_Boxplot_metagenomeseq<- downloadHandler(
+  output$download_Boxplot_metagenomeseq<- metadavis_download("download_Boxplot_metagenomeseq", 
     filename = function(){
       differential_plot_filename("metagenomeseq_plot", input$select_image_type_metagenomeseq, data_metagenomeseq(), 5, "metagenomeseq_individual_plot_page")
     },
@@ -1562,28 +1621,28 @@ server <- function(input, output, session) {
  
   output$deseq2_table <- renderDataTable(DT::datatable((data_deseq2()[[2]]), options = list( pageLength = 15, scrollX = TRUE)))
   
-  output$download_result_deseq2_1 <- downloadHandler(
+  output$download_result_deseq2_1 <- metadavis_download("download_result_deseq2_1", 
     filename = function() { 
       paste("deseq2_result_significant", '.csv', sep='') },
     content = function(file){
       write.csv(data_deseq2()[[2]], file, row.names = FALSE)
     }
   )
-  output$download_result_deseq2_2 <- downloadHandler(
+  output$download_result_deseq2_2 <- metadavis_download("download_result_deseq2_2", 
     filename = function() { 
       paste("deseq2_result_all", '.csv', sep='') },
     content = function(file){
       write.csv(data_deseq2()[[3]], file, row.names = FALSE)
     }
   )
-  output$download_result_deseq2_3 <- downloadHandler(
+  output$download_result_deseq2_3 <- metadavis_download("download_result_deseq2_3", 
     filename = function() { 
       paste("deseq2_normalized_count", '.csv', sep='') },
     content = function(file){
       write.csv(data_deseq2()[[4]], file)
     }
   )
-  output$download_result_deseq2_4 <- downloadHandler(
+  output$download_result_deseq2_4 <- metadavis_download("download_result_deseq2_4", 
     filename = function() { 
       paste("total_counts_in_each_samples", '.csv', sep='') },
     content = function(file){
@@ -1599,7 +1658,7 @@ server <- function(input, output, session) {
   })
   
   
-  output$download_Boxplot_deseq2<- downloadHandler(
+  output$download_Boxplot_deseq2<- metadavis_download("download_Boxplot_deseq2", 
     filename = function(){
       differential_plot_filename("deseq2_plot", input$select_image_type_deseq2, data_deseq2(), 6, "deseq2_individual_plot_page")
     },
@@ -1637,7 +1696,7 @@ server <- function(input, output, session) {
   
   output$LEfSe_table <- renderDataTable(DT::datatable((data_LEfSe()[[2]]), options = list( pageLength = 15, scrollX = TRUE)))
   
-  output$download_result_LEfSe_1 <- downloadHandler(
+  output$download_result_LEfSe_1 <- metadavis_download("download_result_LEfSe_1", 
     filename = function() { 
       paste("LEfSe_result_significant", '.csv', sep='') },
     content = function(file){
@@ -1645,7 +1704,7 @@ server <- function(input, output, session) {
     }
   )
   
-  output$download_result_LEfSe_4 <- downloadHandler(
+  output$download_result_LEfSe_4 <- metadavis_download("download_result_LEfSe_4", 
     filename = function() { 
       paste("total_counts_in_each_samples", '.csv', sep='') },
     content = function(file){
@@ -1657,7 +1716,7 @@ server <- function(input, output, session) {
   })
   
   
-  output$download_Boxplot_LEfSe<- downloadHandler(
+  output$download_Boxplot_LEfSe<- metadavis_download("download_Boxplot_LEfSe", 
     filename = function(){
       paste("LEfSe_plot", input$select_image_type_LEfSe, sep="")
     },
@@ -1710,7 +1769,7 @@ server <- function(input, output, session) {
   #temp_dir <- getwd()
   zip_path <- file.path(getwd(),"/www/hmp2_output.zip")
   # Provide the ZIP file for download
-  output$download_zip_MaAsLin3 <- downloadHandler(
+  output$download_zip_MaAsLin3 <- metadavis_download("download_zip_MaAsLin3", 
     filename = function() {
       "Maaslin3_output.zip"
     },
@@ -1749,21 +1808,21 @@ server <- function(input, output, session) {
   
   output$limma_table <- renderDataTable(DT::datatable((data_limma()[[2]]), options = list( pageLength = 15, scrollX = TRUE)))
   
-  output$download_result_limma_1 <- downloadHandler(
+  output$download_result_limma_1 <- metadavis_download("download_result_limma_1", 
     filename = function() { 
       paste("limma_result_significant", '.csv', sep='') },
     content = function(file){
       write.csv(data_limma()[[2]], file, row.names = FALSE)
     }
   )
-  output$download_result_limma_2 <- downloadHandler(
+  output$download_result_limma_2 <- metadavis_download("download_result_limma_2", 
     filename = function() { 
       paste("limma_result_all", '.csv', sep='') },
     content = function(file){
       write.csv(data_limma()[[3]], file, row.names = FALSE)
     }
   )
-  output$download_result_limma_3 <- downloadHandler(
+  output$download_result_limma_3 <- metadavis_download("download_result_limma_3", 
     filename = function() { 
       paste("total_counts_in_each_samples", '.csv', sep='') },
     content = function(file){
@@ -1781,7 +1840,7 @@ server <- function(input, output, session) {
   })
   
   
-  output$download_Boxplot_limma<- downloadHandler(
+  output$download_Boxplot_limma<- metadavis_download("download_Boxplot_limma", 
     filename = function(){
       differential_plot_filename("limma_plot", input$select_image_type_limma, data_limma(), 5, "limma_individual_plot_page")
     },
@@ -1819,21 +1878,21 @@ server <- function(input, output, session) {
   
   output$edger_table <- renderDataTable(DT::datatable((data_edger()[[2]]), options = list( pageLength = 15, scrollX = TRUE)))
   
-  output$download_result_edger_1 <- downloadHandler(
+  output$download_result_edger_1 <- metadavis_download("download_result_edger_1", 
     filename = function() { 
       paste("edger_result_significant", '.csv', sep='') },
     content = function(file){
       write.csv(data_edger()[[2]], file, row.names = FALSE)
     }
   )
-  output$download_result_edger_2 <- downloadHandler(
+  output$download_result_edger_2 <- metadavis_download("download_result_edger_2", 
     filename = function() { 
       paste("edger_result_all", '.csv', sep='') },
     content = function(file){
       write.csv(data_edger()[[3]], file, row.names = FALSE)
     }
   )
-  output$download_result_edger_3 <- downloadHandler(
+  output$download_result_edger_3 <- metadavis_download("download_result_edger_3", 
     filename = function() { 
       paste("total_counts_in_each_samples", '.csv', sep='') },
     content = function(file){
@@ -1851,7 +1910,7 @@ server <- function(input, output, session) {
   })
   
   
-  output$download_Boxplot_edger<- downloadHandler(
+  output$download_Boxplot_edger<- metadavis_download("download_Boxplot_edger", 
     filename = function(){
       differential_plot_filename("edger_plot", input$select_image_type_edger, data_edger(), 5, "edger_individual_plot_page")
     },
@@ -1883,28 +1942,28 @@ server <- function(input, output, session) {
   
   output$kruskal_wallis_test_table <- renderDataTable(DT::datatable((data_kruskal_wallis_test()[[2]]), options = list( pageLength = 15, scrollX = TRUE)))
   
-  output$download_result_kruskal_wallis_test_1 <- downloadHandler(
+  output$download_result_kruskal_wallis_test_1 <- metadavis_download("download_result_kruskal_wallis_test_1", 
     filename = function() { 
       paste("kruskal_wallis_test_result_significant", '.csv', sep='') },
     content = function(file){
       write.csv(data_kruskal_wallis_test()[[2]], file, row.names = FALSE)
     }
   )
-  output$download_result_kruskal_wallis_test_2 <- downloadHandler(
+  output$download_result_kruskal_wallis_test_2 <- metadavis_download("download_result_kruskal_wallis_test_2", 
     filename = function() { 
       paste("kruskal_wallis_test_result_all", '.csv', sep='') },
     content = function(file){
       write.csv(data_kruskal_wallis_test()[[3]], file, row.names = FALSE)
     }
   )
-  output$download_result_kruskal_wallis_test_3 <- downloadHandler(
+  output$download_result_kruskal_wallis_test_3 <- metadavis_download("download_result_kruskal_wallis_test_3", 
     filename = function() { 
       paste("kruskal_wallis_test_relative_frequency", '.csv', sep='') },
     content = function(file){
       write.csv(data_kruskal_wallis_test()[[4]], file)
     }
   )
-  output$download_result_kruskal_wallis_test_4 <- downloadHandler(
+  output$download_result_kruskal_wallis_test_4 <- metadavis_download("download_result_kruskal_wallis_test_4", 
     filename = function() { 
       paste("total_counts_in_each_samples", '.csv', sep='') },
     content = function(file){
@@ -1921,7 +1980,7 @@ server <- function(input, output, session) {
   })
   
   
-  output$download_Boxplot_kruskal_wallis_test<- downloadHandler(
+  output$download_Boxplot_kruskal_wallis_test<- metadavis_download("download_Boxplot_kruskal_wallis_test", 
     filename = function(){
       differential_plot_filename("kruskal_wallis_test_plot", input$select_image_type_kruskal_wallis_test, data_kruskal_wallis_test(), 6, "kruskal_wallis_test_individual_plot_page")
     },
@@ -1953,28 +2012,28 @@ server <- function(input, output, session) {
   
   output$anova_table <- renderDataTable(DT::datatable((data_anova()[[2]]), options = list( pageLength = 15, scrollX = TRUE)))
   
-  output$download_result_anova_1 <- downloadHandler(
+  output$download_result_anova_1 <- metadavis_download("download_result_anova_1", 
     filename = function() { 
       paste("anova_result_significant", '.csv', sep='') },
     content = function(file){
       write.csv(data_anova()[[2]], file, row.names = FALSE)
     }
   )
-  output$download_result_anova_2 <- downloadHandler(
+  output$download_result_anova_2 <- metadavis_download("download_result_anova_2", 
     filename = function() { 
       paste("anova_result_all", '.csv', sep='') },
     content = function(file){
       write.csv(data_anova()[[3]], file, row.names = FALSE)
     }
   )
-  output$download_result_anova_3 <- downloadHandler(
+  output$download_result_anova_3 <- metadavis_download("download_result_anova_3", 
     filename = function() { 
       paste("anova_relative_frequency", '.csv', sep='') },
     content = function(file){
       write.csv(data_anova()[[4]], file)
     }
   )
-  output$download_result_anova_4 <- downloadHandler(
+  output$download_result_anova_4 <- metadavis_download("download_result_anova_4", 
     filename = function() { 
       paste("total_counts_in_each_samples", '.csv', sep='') },
     content = function(file){
@@ -1992,7 +2051,7 @@ server <- function(input, output, session) {
   })
   
   
-  output$download_Boxplot_anova<- downloadHandler(
+  output$download_Boxplot_anova<- metadavis_download("download_Boxplot_anova", 
     filename = function(){
       differential_plot_filename("anova_plot", input$select_image_type_anova, data_anova(), 6, "anova_individual_plot_page")
     },
@@ -2684,7 +2743,7 @@ server <- function(input, output, session) {
     )
   })
 
-  output$download_bulk_results <- downloadHandler(
+  output$download_bulk_results <- metadavis_download("download_bulk_results", 
     filename = function() {
       paste0("MetaDAVis_bulk_results_", format(Sys.time(), "%Y-%m-%d_%H-%M-%S"), ".zip")
     },
