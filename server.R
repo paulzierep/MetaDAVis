@@ -493,7 +493,10 @@ server <- function(input, output, session) {
 ##         Input         ##
 ###########################  
   observe({
-    if (input$select_file_type == "example") {
+    # The Galaxy input format reads the datasets staged by the container's
+    # entry point, so there is nothing to upload in the browser. Same for the
+    # bundled example data, which is why both hide the two upload boxes.
+    if (input$select_file_type %in% c("example", "galaxy")) {
       shinyjs::hide("box1")
       shinyjs::hide("box2")
       }
@@ -531,6 +534,28 @@ server <- function(input, output, session) {
             "Please select the proper input format and 'Fields separated by'."
           )
         )
+} else if (input$select_file_type == "galaxy") {
+        # Galaxy Interactive Tool: the three datasets were staged by the
+        # container entry point and their paths handed over in environment
+        # variables. Nothing is uploaded through the browser here.
+        inFile1 <- Sys.getenv("METADAVIS_OTU_TABLE", unset = "")
+        inFile2 <- Sys.getenv("METADAVIS_METADATA_FILE", unset = "")
+        taxonomy <- Sys.getenv("METADAVIS_TAXONOMY_TABLE", unset = "")
+
+        validate(
+          need(
+            nzchar(inFile1) && file.exists(inFile1),
+            "No OTU table was staged for this job. Upload files from the browser instead."
+          ),
+          need(
+            nzchar(taxonomy) && file.exists(taxonomy),
+            "No taxonomy table was staged for this job. Upload files from the browser instead."
+          ),
+          need(
+            nzchar(inFile2) && file.exists(inFile2),
+            "No metadata table was staged for this job. Upload files from the browser instead."
+          )
+        )
       } else if (input$select_file_type == "example") {
         # Load example data
         inFile1 <- "www/example_data/Megan_WGS_output.tsv"
@@ -544,8 +569,20 @@ server <- function(input, output, session) {
         return(list("Input is missing", "Input is missing", 30, "Input is missing"))
       }
       
-      # Call the data_input_RA function with provided inputs
-      if (input$select_file_type == "example") {
+# Call the data_input_RA function with provided inputs
+      if (input$select_file_type == "galaxy") {
+        # Separators are detected per file inside data_input_RA(): Galaxy
+        # datasets carry no extension, so the staged files cannot be classified
+        # by name and the user should not have to repeat the separator per file.
+        # "galaxy" is the UI label for the phyloseq-style three-file input.
+        data_input_RA(
+          Input = inFile1,
+          Taxonomy = taxonomy,
+          Index = inFile2,
+          type = input$select_RA_type,
+          file_type = "phyloseq"
+        )
+      } else if (input$select_file_type == "example") {
         data_input_RA(
           Input = inFile1,
           Index = inFile2,

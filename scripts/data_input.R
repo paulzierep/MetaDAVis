@@ -1,7 +1,111 @@
 library("tidyr")
 library("dplyr")
 
-data_input_RA <- function(file_type, Input, Index, type, sep, sep1, show_head = TRUE, head_n = 5){
+# Guess the field separator of a delimited file from its header line. Galaxy
+# datasets have no meaningful extension, and the Galaxy Interactive Tool only
+# ever stages three files, so asking the user to repeat the separator per file
+# is not worth a form field. Anything that is neither tab nor comma separated is
+# reported as tab separated, which is what read.delim() would assume anyway.
+detect_sep <- function(path) {
+  header <- tryCatch(readLines(path, n = 1L, warn = FALSE), error = function(e) character(0))
+  if (length(header) != 1L || !grepl(",", header, fixed = TRUE)) {
+    return("\t")
+  }
+  # Prefer the separator that occurs most often, so that a comma inside a single
+  # sample name does not win over genuinely tab separated data.
+  n_tabs <- lengths(regmatches(header, gregexpr("\t", header, fixed = TRUE)))
+  n_commas <- lengths(regmatches(header, gregexpr(",", header, fixed = TRUE)))
+  if (n_tabs >= n_commas) "\t" else ","
+}
+
+# Strip the Greengenes/SILVA rank prefixes ("d__", "p__", ...) and normalise
+# missing values to "".
+strip_rank_prefix <- function(x) {
+  x <- as.character(x)
+  x <- sub("^[[:alpha:]]__", "", x)
+  x[is.na(x)] <- ""
+  x
+}
+
+# Build the seven-column taxonomy layout MetaDAVis aggregates on, from a
+# phyloseq-style pair of tables:
+#
+#   Input     feature table, features in the rows (first column holds the
+#             feature id), samples in the columns
+#   Taxonomy  taxonomy table, features in the rows (first column holds the
+#             feature id), ranks in the columns
+#
+# The result has the 7 taxonomy columns first and the sample count columns
+# after them, which is exactly the shape the rank-collapsing code below
+# expects, so both input styles share one aggregation path.
+phyloseq_counts_taxonomy <- function(Input, Taxonomy, sep = NULL, show_head = FALSE) {
+  taxa <- c("Kingdom", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+
+  if (is.null(sep)) sep <- detect_sep(Input)
+  tax_sep <- if (is.null(sep)) detect_sep(Taxonomy) else sep
+
+  otu <- read.delim(Input, header = TRUE, row.names = 1, sep = sep, check.names = FALSE)
+  tax <- read.delim(Taxonomy, header = TRUE, row.names = 1, sep = tax_sep, check.names = FALSE)
+
+  if (nrow(otu) == 0L) stop("The OTU table does not contain any features.")
+  if (ncol(otu) == 0L) stop("The OTU table does not contain any sample columns.")
+  if (nrow(tax) == 0L) stop("The taxonomy table does not contain any features.")
+  if (anyDuplicated(colnames(otu))) stop("Sample names in the OTU table must be unique.")
+  if (any(!nzchar(colnames(otu)))) stop("The OTU table has empty sample names.")
+
+  # Map the taxonomy columns onto the seven ranks MetaDAVis knows. Matched
+  # case-insensitively on the column name ("Domain" is accepted as "Kingdom"),
+  # falling back to positional order for unnamed or abbreviated tables, which
+  # is how most taxonomy exports with stripped headers look.
+  tax_names <- tolower(trimws(names(tax)))
+  wanted <- c("kingdom", "phylum", "class", "order", "family", "genus", "species")
+  aliases <- list(c("kingdom", "domain"), "phylum", "class", "order", "family", "genus", "species")
+  match_at <- vapply(seq_along(wanted), function(i) {
+    hit <- which(tax_names %in% aliases[[i]])
+    if (length(hit)) hit[[1]] else NA_integer_
+  }, integer(1))
+
+  if (all(is.na(match_at)) && ncol(tax) >= 7L) {
+    match_at <- seq_len(7L)
+  }
+  if (anyNA(match_at)) {
+    stop(paste0(
+      "The taxonomy table needs columns for ", taxa[[1]],
+      " to ", taxa[[7]], ". Found: ",
+      paste(names(tax), collapse = ", "), "."
+    ))
+  }
+
+  tax_m <- matrix("", nrow = nrow(otu), ncol = 7L)
+  for (i in seq_len(7L)) {
+    column <- match(rownames(otu), rownames(tax))
+    tax_m[, i] <- strip_rank_prefix(tax[[match_at[[i]]]])[column]
+  }
+  colnames(tax_m) <- taxa
+  tax_m <- as.data.frame(tax_m, stringsAsFactors = FALSE)
+
+  # Features with no taxonomy row at all would otherwise come back as an empty
+  # name at every rank: the lineage back-filling only fills blanks from a named
+  # ancestor, and there is none. Label them explicitly so they show up in the
+  # taxonomy table and in plot labels as "Unclassified" rather than as a blank.
+  unclassified <- rowSums(is.na(tax_m) | tax_m == "") == 7L
+  if (any(unclassified)) {
+    tax_m[["Kingdom"]][unclassified] <- "Unclassified"
+  }
+
+  out <- cbind(tax_m, otu, stringsAsFactors = FALSE)
+  rownames(out) <- NULL
+
+  if (isTRUE(show_head)) {
+    cat("\n--- data_tmp (phyloseq OTU x taxonomy) ---\n",
+        paste(utils::capture.output(utils::head(out, 5L)), collapse = "\n"), "\n", sep = "")
+  }
+  out
+}
+
+# `sep`/`sep1` default to NULL so that the phyloseq path can detect the separator
+# per file; the other formats are called with explicit separators by the UI.
+data_input_RA <- function(file_type, Input, Index, Taxonomy = NULL, type, sep = NULL, sep1 = NULL, show_head = TRUE, head_n = 5){
   
   log_head <- function(x, label){
     if (show_head) {
@@ -34,6 +138,28 @@ data_input_RA <- function(file_type, Input, Index, type, sep, sep1, show_head = 
     rownames(data_index2) <- NULL
     log_head(data_index2, "data_index2 (unique conditions)")
   }
+  else if (file_type == "phyloseq"){
+    # phyloseq sample data: sample ids in the first column, one column per
+    # annotation. Kept in exactly the same shape as the other input types,
+    # because the downstream plotting code reads column 1 as "Samples" and
+    # column 2 as the grouping condition (see individual_bar_plot.R).
+    if (is.null(sep1)) sep1 <- detect_sep(Index)
+    data_index  <- read.delim(Index, header = TRUE, sep = sep1, check.names = FALSE)
+    if (ncol(data_index) < 2L) {
+      stop("The metadata table needs a sample column plus at least one annotation column.")
+    }
+    colnames(data_index)[1:2] <- c("Samples","Condition")
+    log_head(data_index, "data_index (phyloseq metadata)")
+
+    data_index1 <- read.delim(Index, header = TRUE, row.names = 1, sep = sep1, check.names = FALSE)
+    colnames(data_index1) <- "Condition"
+    log_head(data_index1, "data_index1 (phyloseq metadata, row.names=Samples)")
+
+    text_data_index <- paste("There are ", nrow(data_index), " Samples.", sep = "")
+    data_index2 <- unique(data_index[c("Condition")])
+    rownames(data_index2) <- NULL
+    log_head(data_index2, "data_index2 (phyloseq unique conditions)")
+  }
   else if (file_type == "example"){
     data_index  <- read.delim(Index, header = TRUE, sep = "\t")
     colnames(data_index)[1:2] <- c("Samples","Condition")
@@ -53,6 +179,9 @@ data_input_RA <- function(file_type, Input, Index, type, sep, sep1, show_head = 
   }
   
   # counts / taxonomy input
+  if (file_type == "phyloseq" && (is.null(Taxonomy) || !nzchar(Taxonomy) || !file.exists(Taxonomy))) {
+    stop("The phyloseq input format needs an OTU table, a taxonomy table and a metadata table.")
+  }
   if (file_type == "qiime_format"){
     data_tmp <- as.data.frame(t(read.delim(Input, header = FALSE, sep = sep)))
     names(data_tmp) <- as.character(data_tmp[1,])
@@ -80,8 +209,45 @@ data_input_RA <- function(file_type, Input, Index, type, sep, sep1, show_head = 
     colnames(data_tmp)[1:7] <- c("Kingdom","Phylum","Class","Order","Family","Genus","Species")
     log_head(data_tmp, "data_tmp (check)")
   }
+  else if (file_type == "phyloseq"){
+    data_tmp <- phyloseq_counts_taxonomy(Input, Taxonomy, sep = sep, show_head = show_head)
+  }
   else{
     print("Check your file format and separators. Also ensure sample names match between count and metadata.")
+  }
+  
+  # phyloseq tables are features x samples, so the OTU column names are the
+  # sample names and have to line up with the metadata. The other formats already
+  # share the sample columns between count and metadata by construction.
+  if (file_type == "phyloseq"){
+    missing_samples <- setdiff(colnames(data_tmp)[-(1:7)], data_index[["Samples"]])
+    extra_samples <- setdiff(data_index[["Samples"]], colnames(data_tmp)[-(1:7)])
+    if (length(missing_samples)) {
+      stop(paste0(
+        "These samples are in the OTU table but not in the metadata: ",
+        paste(utils::head(missing_samples, 10), collapse = ", "),
+        if (length(missing_samples) > 10) ", ..." else "", ". ",
+        "Sample names have to match between the OTU table and the metadata."
+      ))
+    }
+    if (length(extra_samples)) {
+      warning(paste0(
+        "Ignoring ", length(extra_samples),
+        " metadata row(s) without a matching sample in the OTU table."
+      ))
+      keep <- data_index[["Samples"]] %in% colnames(data_tmp)[-(1:7)]
+      data_index  <- data_index[keep, , drop = FALSE]
+      data_index1 <- data_index1[rownames(data_index1) %in% data_index[["Samples"]], , drop = FALSE]
+      rownames(data_index) <- NULL
+    }
+    # Downstream code pairs the OTU columns with the metadata row by row, so
+    # reorder the metadata to follow the OTU table's sample order.
+    if (!identical(as.character(data_index[["Samples"]]), colnames(data_tmp)[-(1:7)])) {
+      ord <- match(colnames(data_tmp)[-(1:7)], data_index[["Samples"]])
+      data_index  <- data_index[ord, , drop = FALSE]
+      data_index1 <- data_index1[rownames(data_index1)[ord], , drop = FALSE]
+      rownames(data_index) <- NULL
+    }
   }
   
   data_tmp[is.na(data_tmp)] <- ''

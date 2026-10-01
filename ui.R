@@ -268,8 +268,8 @@ tags$head(
       sidebarLayout(
         sidebarPanel(
           h3("Upload files"),
-          selectInput("select_file_type", label = "Select Input format", choices = list("Qiime2" = "qiime_format", "Megan" ="Megan", "Taxa count file (prepare your own file based on example)" = "check", "Example data (To test our tool)" ="example"), selected = "qiime_format"),
-          h5("The file accepts .txt or .tsv (Megan and users own file) or .csv formats (Qiime2)"),
+          selectInput("select_file_type", label = "Select Input format", choices = list("Qiime2" = "qiime_format", "Megan" ="Megan", "Taxa count file (prepare your own file based on example)" = "check", "Example data (To test our tool)" ="example", "Galaxy input (OTU table, taxonomy and metadata uploaded to Galaxy)" ="galaxy"), selected = "qiime_format"),
+          h5("The file accepts .txt or .tsv (Megan and users own file) or .csv formats (Qiime2). Galaxy input accepts tab or comma separated tables, detected automatically."),
            fluidRow(
           box(id = "box1", width = 12,
           column(width = 8, fileInput("file1", "Upload count file ", accept = c(".tsv", ".txt", ".csv"),multiple = F)),
