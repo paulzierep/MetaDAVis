@@ -283,11 +283,6 @@ tags$head(
           ),
           ),
           radioButtons("select_RA_type", "Choose the level to display", choices = c("Kingdom" = 1, "Phylum" = 2, "Class" = 3, "Order" = 4, "Family" = 5,  "Genus" = 6, "Species" = 7), selected = 4),
-          # Only meaningful for the Galaxy input: the staged metadata table can
-          # have any number of annotation columns, and the analysis uses exactly
-          # one of them as the grouping condition. Left empty, the second column
-          # is used, which matches the convention of the other input formats.
-          uiOutput("galaxy_condition_box"),
           actionButton("action_level", "Submit")
           
         ),

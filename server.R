@@ -505,34 +505,6 @@ server <- function(input, output, session) {
       shinyjs::show("box2") 
     }
   })
-
-  # Only the Galaxy input can carry a metadata table with more than two
-  # columns, and only that one needs to be asked which column is the condition.
-  output$galaxy_condition_box <- renderUI({
-    if (identical(input$select_file_type, "galaxy")) {
-      div(
-        style = "margin-top: 10px;",
-        textInput(
-          "galaxy_condition_column",
-          "Grouping condition column",
-          value = "",
-          width = "100%",
-          placeholder = "column number or name"
-        ),
-        helpText(
-          "Column of the metadata table holding the grouping condition. ",
-          "Give either its number (",
-          tags$code("2"), ") or its name (",
-          tags$code("Condition"), ", ",
-          tags$code("diagnosis"),
-          "). The samples are grouped by this column in every comparison. ",
-          "If left empty, the second column of the metadata table is used."
-        )
-      )
-    } else {
-      NULL
-    }
-  })
   
   dataInput_RA_level <- eventReactive(input$action_level, {
     run_with_tracking("action_level", function() {
@@ -569,27 +541,21 @@ server <- function(input, output, session) {
         inFile1 <- Sys.getenv("METADAVIS_OTU_TABLE", unset = "")
         inFile2 <- Sys.getenv("METADAVIS_METADATA_FILE", unset = "")
         taxonomy <- Sys.getenv("METADAVIS_TAXONOMY_TABLE", unset = "")
-        # Pre-selected in the Galaxy form; the text field below overrides it.
-        staged_condition <- Sys.getenv("METADAVIS_CONDITION_COLUMN", unset = "")
 
-        # All three datasets are optional in the tool, so a job may carry none,
-        # some or all of them. Only report the ones that are actually missing,
-        # and tell the user they can upload from the browser instead.
-        missing_inputs <- c(
-          if (!nzchar(inFile1) || !file.exists(inFile1)) "OTU table",
-          if (!nzchar(taxonomy) || !file.exists(taxonomy)) "taxonomy table",
-          if (!nzchar(inFile2) || !file.exists(inFile2)) "metadata table"
+        validate(
+          need(
+            nzchar(inFile1) && file.exists(inFile1),
+            "No OTU table was staged for this job. Upload files from the browser instead."
+          ),
+          need(
+            nzchar(taxonomy) && file.exists(taxonomy),
+            "No taxonomy table was staged for this job. Upload files from the browser instead."
+          ),
+          need(
+            nzchar(inFile2) && file.exists(inFile2),
+            "No metadata table was staged for this job. Upload files from the browser instead."
+          )
         )
-        if (length(missing_inputs)) {
-          validate(need(
-            FALSE,
-            paste0(
-              "This job has no ", paste(missing_inputs, collapse = ", "),
-              " staged. Select a different input format, or upload the ",
-              "file(s) in this tab, or use the example data."
-            )
-          ))
-        }
       } else if (input$select_file_type == "example") {
         # Load example data
         inFile1 <- "www/example_data/Megan_WGS_output.tsv"
@@ -614,14 +580,6 @@ server <- function(input, output, session) {
           Taxonomy = taxonomy,
           Index = inFile2,
           type = input$select_RA_type,
-          # An empty text field means "not filled in here", so fall back to the
-          # column chosen in the Galaxy form.
-          Condition = if (!is.null(input$galaxy_condition_column) &&
-                          nzchar(trimws(input$galaxy_condition_column))) {
-            trimws(input$galaxy_condition_column)
-          } else {
-            staged_condition
-          },
           file_type = "phyloseq"
         )
       } else if (input$select_file_type == "example") {
