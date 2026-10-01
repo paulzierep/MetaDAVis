@@ -30,10 +30,13 @@ server <- function(input, output, session) {
     }
 
     name <- metadavis_download_name(handler, id)
-    # A download handler is written against a path shiny hands it, so any
-    # writable path will do - the extension is what Galaxy reads the datatype
-    # from, and that is what the name carries.
-    path <- file.path(tempdir(), paste0("metadavis_", session$token, "_", name))
+    # Write directly into the Galaxy job's discovered output directory. This
+    # keeps the result available when the interactive job ends even if the API
+    # upload below cannot reach Galaxy.
+    path <- metadavis_galaxy_output_path(name)
+    if (is.na(path)) {
+      path <- file.path(tempdir(), paste0("metadavis_", session$token, "_", name))
+    }
     produced <- tryCatch(
       {
         handler$content(path)
@@ -52,8 +55,40 @@ server <- function(input, output, session) {
       return()
     }
 
-    result <- metadavis_send_to_galaxy(path, name)
-    unlink(path)
+    persisted <- identical(dirname(path), normalizePath(
+      metadavis_galaxy_output_dir(), mustWork = FALSE
+    ))
+    if (persisted) {
+      upload_started <- tryCatch(
+        {
+          metadavis_send_to_galaxy_async(path, name)
+          TRUE
+        },
+        error = function(e) {
+          metadavis_galaxy_log("could not start direct upload name=", name, " error=", conditionMessage(e))
+          FALSE
+        }
+      )
+      metadavis_galaxy_log(
+        "saved output name=", name,
+        " path=", normalizePath(path, mustWork = FALSE),
+        " bytes=", file.info(path)$size,
+        " direct_upload=", if (upload_started) "started asynchronously" else "not started"
+      )
+      result <- list(
+        ok = TRUE,
+        message = paste0(
+          "Saved ", name, ". Direct history upload was started in the background; ",
+          "the file will also appear in MetaDAVis results when this interactive job ends."
+        )
+      )
+    } else {
+      result <- list(
+        ok = FALSE,
+        message = "No Galaxy output directory is available for this session."
+      )
+      unlink(path)
+    }
     showNotification(
       result$message,
       type = if (isTRUE(result$ok)) "message" else "error",

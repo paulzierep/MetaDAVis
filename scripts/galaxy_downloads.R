@@ -1,11 +1,9 @@
 # Uploading a download to the Galaxy history of the running session.
 #
-# Every table and plot of this application has a download button. Inside Galaxy
-# that button is only half the story: whatever a user produces is gone when the
-# browser tab is closed, and downloading it into ~/Downloads of the machine the
-# browser runs on is not what a Galaxy user wants. So each of those buttons gets
-# a "Send to Galaxy" companion that puts the very same file into the history the
-# interactive session belongs to, where it can be used by the next tool.
+# Every table and plot of this application has a download button. Inside Galaxy,
+# each gets a companion that saves the same file in the tool's discovered output
+# directory. Galaxy adds those files to the history when the interactive job
+# ends. This avoids blocking Shiny on an API request from inside the container.
 #
 # The upload itself is galaxy_ie_helpers (https://github.com/bgruening/galaxy_ie_helpers),
 # which knows how to reach the Galaxy instance from inside a tool container and
@@ -21,16 +19,15 @@
 # downloadHandler() plus a note of the file name and content function, so
 # "Send to Galaxy" writes the same file a click on the download button would.
 
-# --- the python that carries the upload --------------------------------------
+# --- the command that carries the upload -------------------------------------
 
-# The helper is installed into its own virtualenv in the container image. A
-# venv is used because Ubuntu marks the system python as externally managed, and
-# it also keeps the R stack of this image from reaching it by accident.
-metadavis_galaxy_python <- function() {
+# The helper is installed into its own virtualenv in the container image. Use
+# its supported console command; the Python package has no __main__ module.
+metadavis_galaxy_put <- function() {
   candidates <- c(
-    Sys.getenv("METADAVIS_GALAXIE_PYTHON", unset = ""),
-    "/opt/galaxy_ie_helpers/bin/python",
-    "python3"
+    Sys.getenv("METADAVIS_GALAXY_PUT", unset = ""),
+    "/opt/galaxy_ie_helpers/bin/put",
+    "put"
   )
   for (candidate in candidates) {
     if (!nzchar(candidate)) next
@@ -53,12 +50,35 @@ metadavis_galaxy_key <- function() {
   Sys.getenv("API_KEY", unset = "")
 }
 
+metadavis_galaxy_output_dir <- function() {
+  Sys.getenv("METADAVIS_OUTPUT_DIR", unset = "")
+}
+
+metadavis_galaxy_output_path <- function(name) {
+  output_dir <- metadavis_galaxy_output_dir()
+  if (!nzchar(output_dir)) {
+    return(NA_character_)
+  }
+  dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+  file.path(output_dir, basename(name))
+}
+
+metadavis_galaxy_log <- function(...) {
+  line <- paste0(format(Sys.time(), "%Y-%m-%dT%H:%M:%S%z"), " ", paste0(..., collapse = ""))
+  message(line)
+  output_dir <- metadavis_galaxy_output_dir()
+  if (nzchar(output_dir)) {
+    dir.create(output_dir, recursive = TRUE, showWarnings = FALSE)
+    cat(line, "\n", file = file.path(output_dir, "galaxy_upload.log"), append = TRUE)
+  }
+}
+
 # TRUE when this session can upload back to Galaxy. Checked in the UI as well,
 # so a plain `docker run` does not offer buttons that cannot work.
 metadavis_galaxy_ready <- function() {
   nzchar(metadavis_galaxy_history()) &&
     nzchar(metadavis_galaxy_key()) &&
-    !is.na(metadavis_galaxy_python())
+    !is.na(metadavis_galaxy_put())
 }
 
 # --- the upload --------------------------------------------------------------
@@ -70,8 +90,8 @@ metadavis_send_to_galaxy <- function(path, name = basename(path), filetype = "au
   if (!file.exists(path)) {
     return(list(ok = FALSE, message = paste0("there is no file to send at ", path)))
   }
-  python <- metadavis_galaxy_python()
-  if (is.na(python)) {
+  put <- metadavis_galaxy_put()
+  if (is.na(put)) {
     return(list(
       ok = FALSE,
       message = "galaxy_ie_helpers is not installed, so nothing can be sent back to Galaxy"
@@ -87,22 +107,34 @@ metadavis_send_to_galaxy <- function(path, name = basename(path), filetype = "au
     ))
   }
 
+  galaxy_url <- Sys.getenv("GALAXY_URL", unset = "<unset>")
+  galaxy_port <- Sys.getenv("GALAXY_WEB_PORT", unset = "<unset>")
+  metadavis_galaxy_log(
+    "upload start name=", name,
+    " path=", normalizePath(path, mustWork = FALSE),
+    " bytes=", file.info(path)$size,
+    " filetype=", filetype,
+    " history=", metadavis_galaxy_history(),
+    " url=", galaxy_url,
+    " fallback_port=", galaxy_port,
+    " put=", put,
+    " api_key_present=", nzchar(metadavis_galaxy_key())
+  )
+
   # galaxy_ie_helpers has no output of its own on success, so the exit status is
   # what says whether the dataset made it into the history. Anything it does
   # print (with DEBUG=TRUE, the bioblend request log) is kept as the message.
   #
-  # Its put() is called directly instead of through `python -m` or the installed
-  # `put` console script: the package has no __main__, and the console script's
-  # flags (-p/--filepath) are one of two spellings the CLI has had.
-  script <- paste(
-    "import sys;",
-    "from galaxy_ie_helpers import put;",
-    "put([sys.argv[1]], file_type=sys.argv[2], history_id=sys.argv[3])"
-  )
+  # Invoke the same put command used by other Galaxy Shiny applications. The
+  # helper reads GALAXY_URL, GALAXY_WEB_PORT and API_KEY from the environment.
   output <- tryCatch(
     system2(
-      python,
-      c("-c", shQuote(script), shQuote(path), shQuote(filetype), shQuote(metadavis_galaxy_history())),
+      put,
+      c(
+        "-p", shQuote(path),
+        "-t", shQuote(filetype),
+        "--history-id", shQuote(metadavis_galaxy_history())
+      ),
       stdout = TRUE,
       stderr = TRUE
     ),
@@ -111,8 +143,16 @@ metadavis_send_to_galaxy <- function(path, name = basename(path), filetype = "au
 
   status <- attr(output, "status")
   if (is.null(status)) status <- 0L
+  error_detail <- attr(output, "error")
+  output_text <- paste(as.character(output), collapse = " | ")
+  metadavis_galaxy_log(
+    "upload finish name=", name,
+    " exit_status=", status,
+    if (!is.null(error_detail)) paste0(" error=", error_detail) else "",
+    if (nzchar(output_text)) paste0(" output=", output_text) else " output=<empty>"
+  )
   if (status != 0L) {
-    detail <- paste(utils::tail(as.character(output), 5L), collapse = "\n")
+    detail <- paste(utils::tail(as.character(output), 20L), collapse = "\n")
     return(list(
       ok = FALSE,
       message = paste0(
@@ -122,6 +162,23 @@ metadavis_send_to_galaxy <- function(path, name = basename(path), filetype = "au
     ))
   }
   list(ok = TRUE, message = paste0(name, " was added to the Galaxy history"))
+}
+
+metadavis_send_to_galaxy_async <- function(path, name = basename(path), filetype = "auto") {
+  rscript <- file.path(R.home("bin"), "Rscript")
+  helper <- normalizePath("scripts/galaxy_downloads.R", mustWork = TRUE)
+  expression <- paste0(
+    "source(", encodeString(helper, quote = "\""), "); ",
+    "metadavis_send_to_galaxy(", encodeString(normalizePath(path), quote = "\""), ", ",
+    encodeString(name, quote = "\""), ", ", encodeString(filetype, quote = "\""), ")"
+  )
+  system2(
+    rscript,
+    c("--vanilla", "-e", shQuote(expression)),
+    stdout = FALSE,
+    stderr = FALSE,
+    wait = FALSE
+  )
 }
 
 # --- the download registry ---------------------------------------------------
