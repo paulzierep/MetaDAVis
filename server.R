@@ -7,12 +7,6 @@ server <- function(input, output, session) {
   # that puts the file it produces into the history of this interactive session
   # (see scripts/galaxy_downloads.R). The registry below is what makes that
   # possible without a second implementation of any table or plot:
-  imported <- galaxy_ie_picker_server(input, output, session)
-  observeEvent(imported(), {
-    fp <- Sys.getenv("METADAVIS_OTU_TABLE", unset = "")
-    if (!nzchar(fp) || !file.exists(fp)) return()
-    session$sendInputMessage("file1", list(datapath = fp, name = basename(fp)))
-  }, ignoreInit = TRUE)
 
   # metadavis_download() is downloadHandler() plus a note of the file name and
   # content function, and the observer produces the file again on request.
