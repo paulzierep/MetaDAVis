@@ -41,6 +41,11 @@ if (!require('maaslin3'))BiocManager::install("biobakery/maaslin3", update = FAL
 if (!require('lefser'))BiocManager::install("lefser", update = FALSE)
 source("scripts/data_input.R")
 source("scripts/galaxy_downloads.R")
+# Shared Galaxy history import. scripts/galaxy_ie.R is used here for the picker
+# only: this application already ships its own "Send to Galaxy" buttons, so
+# galaxy_ie_send_ui() is deliberately not called and no second button is injected.
+source("scripts/galaxy_ie.R")
+galaxy_ie_app("metadavis", "METADAVIS_OUTPUT_DIR", "METADAVIS_OTU_TABLE")
 options(shiny.maxRequestSize=2000*1024^2)
 options(future.globals.maxSize= 925289600000)
 #views

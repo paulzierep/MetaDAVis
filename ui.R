@@ -276,6 +276,9 @@ tags$head(
       sidebarLayout(
         sidebarPanel(
           h3("Upload files"),
+          # Import the count table from the current Galaxy history. Renders
+          # nothing outside an interactive tool (no HISTORY_ID / API_KEY).
+          galaxy_ie_picker_ui(),
           selectInput("select_file_type", label = "Select Input format", choices = list("Qiime2" = "qiime_format", "Megan" ="Megan", "Taxa count file (prepare your own file based on example)" = "check", "Example data (To test our tool)" ="example", "Galaxy input (OTU table, taxonomy and metadata uploaded to Galaxy)" ="galaxy"), selected = "qiime_format"),
           h5("The file accepts .txt or .tsv (Megan and users own file) or .csv formats (Qiime2). Galaxy input accepts tab or comma separated tables, detected automatically."),
            fluidRow(
